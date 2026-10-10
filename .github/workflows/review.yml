@@ -134,6 +134,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
+          allowed_bots: pir-bot
           claude_args: >-
             --model ${{ inputs.model }}
             --max-turns 4
