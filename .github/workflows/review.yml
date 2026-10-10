@@ -166,19 +166,31 @@ jobs:
           BLOCKERS=$(jq '[.issues[]? | select(.severity=="blocker")] | length' out.json)
           VERDICT=$(jq -r '.verdict' out.json)
 
-          # Pir nunca aprueba ni bloquea: solo comenta; la aprobacion es manual.
+          # Mergeable: GitHub lo calcula de forma asincrona; reintentar hasta que deje de ser null.
+          MERGEABLE=null
+          for i in 1 2 3 4 5 6; do
+            MERGEABLE=$(gh api "repos/$REPO/pulls/$PR" --jq '.mergeable')
+            [ "$MERGEABLE" != "null" ] && break
+            sleep 5
+          done
+
+          # Pir aprueba solo si: sin conflictos, CI no fallo, sin blockers, diff completo
+          # y sin tocar workflows. Nunca bloquea (no usa REQUEST_CHANGES).
           EVENT=COMMENT
-          if [ "$BLOCKERS" -gt 0 ] || [ "$CI_RESULT" = "failure" ]; then
+          if [ "$MERGEABLE" = "false" ]; then
+            LABEL="Conflictos de merge"
+          elif [ "$BLOCKERS" -gt 0 ] || [ "$CI_RESULT" = "failure" ]; then
             LABEL="Cambios requeridos"
-          elif [ "$VERDICT" != "approve" ] || [ "$TRUNC" = "true" ] || [ "$WORKFLOW_TOUCHED" = "true" ]; then
+          elif [ "$VERDICT" != "approve" ] || [ "$TRUNC" = "true" ] || [ "$WORKFLOW_TOUCHED" = "true" ] || [ "$MERGEABLE" != "true" ]; then
             LABEL="Requiere revision manual"
           else
-            LABEL="Listo para aprobar"
+            EVENT=APPROVE; LABEL="Aprobado"
           fi
 
           NOTES=""
-          if [ "$TRUNC" = "true" ]; then NOTES="$NOTES"$'\n'"- Diff truncado: solo se reviso el inicio."; fi
-          if [ "$WORKFLOW_TOUCHED" = "true" ]; then NOTES="$NOTES"$'\n'"- Toca .github/workflows: revisar a mano con cuidado."; fi
+          if [ "$TRUNC" = "true" ]; then NOTES="$NOTES"$'\n'"- Diff truncado: solo se reviso el inicio, no se aprueba."; fi
+          if [ "$WORKFLOW_TOUCHED" = "true" ]; then NOTES="$NOTES"$'\n'"- Toca .github/workflows: no se aprueba automaticamente."; fi
+          if [ "$MERGEABLE" = "false" ]; then NOTES="$NOTES"$'\n'"- Tiene conflictos con la rama base."; fi
 
           BODY=$(jq -r --arg model "$MODEL" --arg ci "$CI_RESULT" --arg label "$LABEL" --arg notes "$NOTES" '
             "### Pir: " + $label + " (revision automatica, " + $model + ")\n\n" + .summary +

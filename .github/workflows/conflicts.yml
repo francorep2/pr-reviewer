@@ -1,0 +1,99 @@
+name: Pir conflicts (reusable)
+
+# Detecta PRs con conflictos de merge y avisa por comentario + mail.
+# Corre en pull_request_target (los workflows pull_request NO corren si hay conflictos)
+# y en push a la rama por defecto (un PR puede pasar a tener conflictos despues).
+# Seguridad: no hace checkout ni ejecuta codigo del PR; solo usa la API.
+
+on:
+  workflow_call:
+    inputs:
+      email_to:
+        type: string
+        default: francorep2@gmail.com
+    secrets:
+      PIR_APP_ID:
+        required: false
+      PIR_APP_PRIVATE_KEY:
+        required: false
+      RESEND_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Get Pir app token
+        id: pir
+        if: ${{ env.HAS_APP == 'true' }}
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.PIR_APP_ID }}
+          private-key: ${{ secrets.PIR_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Detect conflicts and notify
+        env:
+          GH_TOKEN: ${{ steps.pir.outputs.token || github.token }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ inputs.email_to }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "pull_request_target" ]; then
+            PRS="$PR_NUMBER"
+          else
+            PRS=$(gh pr list -R "$REPO" --state open --base "$DEFAULT_BRANCH" --json number --jq '.[].number')
+          fi
+
+          for n in $PRS; do
+            MERGEABLE=null
+            for i in 1 2 3 4 5 6; do
+              INFO=$(gh api "repos/$REPO/pulls/$n")
+              MERGEABLE=$(echo "$INFO" | jq -r '.mergeable')
+              [ "$MERGEABLE" != "null" ] && break
+              sleep 5
+            done
+            [ "$MERGEABLE" = "false" ] || continue
+            [ "$(echo "$INFO" | jq -r '.draft')" = "true" ] && continue
+
+            HEAD_SHA=$(echo "$INFO" | jq -r '.head.sha')
+            BASE_REF=$(echo "$INFO" | jq -r '.base.ref')
+            HEAD_REF=$(echo "$INFO" | jq -r '.head.ref')
+            TITLE=$(echo "$INFO" | jq -r '.title')
+            URL=$(echo "$INFO" | jq -r '.html_url')
+            MARK="<!-- pir-conflict:$HEAD_SHA -->"
+
+            # Un aviso por (PR, commit): no repetir si ya se aviso para este head.
+            if gh api "repos/$REPO/issues/$n/comments" --paginate --jq '.[].body' | grep -qF "$MARK"; then
+              continue
+            fi
+
+            BODY=$(printf '### Pir: Conflictos de merge\n\nEsta PR (`%s`) tiene conflictos con `%s` y no puede mergearse todavia.\n\n- Resolvelos a mano, o\n- Comenta `/pir resolver` en esta PR y Pir intenta corregirlos.\n\n%s' "$HEAD_REF" "$BASE_REF" "$MARK")
+            gh api "repos/$REPO/issues/$n/comments" -f body="$BODY" > /dev/null
+
+            if [ -n "${RESEND_API_KEY:-}" ]; then
+              TEXT=$(printf 'La PR #%s "%s" tiene conflictos con %s.\n\nOpciones:\n- Resolverlos a mano.\n- Comentar "/pir resolver" en la PR para que Pir intente corregirlos.\n\n%s' "$n" "$TITLE" "$BASE_REF" "$URL")
+              jq -n --arg to "$EMAIL_TO" --arg subject "[Pir] [$REPO] PR #$n - Conflictos de merge - $TITLE" --arg text "$TEXT" \
+                '{from:"Pir <onboarding@resend.dev>", to:[$to], subject:$subject, text:$text}' > mail.json
+              curl -sS --fail-with-body https://api.resend.com/emails \
+                -H "Authorization: Bearer $RESEND_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d @mail.json > /dev/null
+            else
+              echo "::notice::RESEND_API_KEY no configurada; no se envio mail (PR #$n)"
+            fi
+          done
