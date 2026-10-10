@@ -8,7 +8,7 @@ on:
         default: claude-haiku-5-5
       email_to:
         type: string
-        default: thegamershop.naon@gmail.com
+        default: francorep2@gmail.com
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: false
