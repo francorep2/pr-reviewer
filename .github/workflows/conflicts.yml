@@ -1,9 +1,11 @@
 name: Pir conflicts (reusable)
 
-# Detecta PRs con conflictos de merge y avisa por comentario + mail.
+# Detecta PRs con conflictos de merge y avisa por comentario + mail, explicando el motivo
+# (archivos en conflicto, quien cambio que, y un fragmento del conflicto).
 # Corre en pull_request_target (los workflows pull_request NO corren si hay conflictos)
 # y en push a la rama por defecto (un PR puede pasar a tener conflictos despues).
-# Seguridad: no hace checkout ni ejecuta codigo del PR; solo usa la API.
+# Seguridad: hace checkout de la rama BASE y solo trae los objetos del PR para analizarlos
+# con git (merge-tree/log); nunca hace checkout ni ejecuta codigo del PR.
 
 on:
   workflow_call:
@@ -40,6 +42,13 @@ jobs:
           private-key: ${{ secrets.PIR_APP_PRIVATE_KEY }}
           permission-pull-requests: write
           permission-issues: write
+          permission-contents: read
+
+      # Con pull_request_target y push, el checkout por defecto es la rama base/por defecto.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.pir.outputs.token || github.token }}
 
       - name: Detect conflicts and notify
         env:
@@ -82,11 +91,56 @@ jobs:
               continue
             fi
 
-            BODY=$(printf '### Pir: Conflictos de merge\n\nEsta PR (`%s`) tiene conflictos con `%s` y no puede mergearse todavia.\n\n- Resolvelos a mano, o\n- Comenta `/pir resolver` en esta PR y Pir intenta corregirlos.\n\n%s' "$HEAD_REF" "$BASE_REF" "$MARK")
+            # ---- Analisis del motivo (solo git sobre objetos; no se ejecuta codigo del PR) ----
+            DETAILS=""
+            if git fetch -q origin "pull/$n/head:refs/pir/pr-$n" 2>/dev/null; then
+              BASE="origin/$BASE_REF"
+              PRREF="refs/pir/pr-$n"
+              MB=$(git merge-base "$BASE" "$PRREF" 2>/dev/null || true)
+              OUT=$(git merge-tree --write-tree --name-only --messages "$BASE" "$PRREF" 2>&1 || true)
+              TREE=$(echo "$OUT" | head -1)
+              FILES=$(echo "$OUT" | sed -n '2,/^$/p' | sed '/^$/d')
+              NFILES=$(echo "$FILES" | grep -c . || true)
+
+              if [ -n "$MB" ]; then
+                AHEAD=$(git rev-list --count "$MB..$BASE")
+                DETAILS="La rama \`$BASE_REF\` avanzo $AHEAD commit(s) desde que se creo esta rama (punto de union: \`${MB:0:7}\`), y algunos tocan las mismas lineas que esta PR."
+              fi
+              DETAILS="$DETAILS"$'\n\n'"Archivos en conflicto ($NFILES):"
+
+              c=0
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                c=$((c+1)); [ "$c" -gt 8 ] && { DETAILS="$DETAILS"$'\n'"- ... y $((NFILES-8)) mas"; break; }
+                KIND=$(echo "$OUT" | grep -F "CONFLICT" | grep -F "$f" | head -1 || true)
+                BASE_LOG=""; PR_LOG=""
+                if [ -n "$MB" ]; then
+                  BASE_LOG=$(git log --no-merges -n 3 --date=short --format='    - %h %s (%an, %ad)' "$MB..$BASE" -- "$f" || true)
+                  PR_LOG=$(git log --no-merges -n 3 --date=short --format='    - %h %s (%an, %ad)' "$MB..$PRREF" -- "$f" || true)
+                fi
+                DETAILS="$DETAILS"$'\n'"- \`$f\`"
+                [ -n "$KIND" ] && DETAILS="$DETAILS"$'\n'"  - $KIND"
+                [ -n "$BASE_LOG" ] && DETAILS="$DETAILS"$'\n'"  - Cambios en \`$BASE_REF\`:"$'\n'"$BASE_LOG"
+                [ -n "$PR_LOG" ] && DETAILS="$DETAILS"$'\n'"  - Cambios en esta PR:"$'\n'"$PR_LOG"
+
+                # Fragmento del conflicto (solo archivos de texto; primer bloque, max 25 lineas)
+                if git cat-file -e "$TREE:$f" 2>/dev/null; then
+                  HUNK=$(git show "$TREE:$f" 2>/dev/null | grep -Iq . && git show "$TREE:$f" | awk '/^<<<<<<< /{p=1} p{print} /^>>>>>>> /{if(p) exit}' | head -25 || true)
+                  if [ -n "$HUNK" ]; then
+                    DETAILS="$DETAILS"$'\n'"  - Fragmento:"$'\n'"\`\`\`"$'\n'"$HUNK"$'\n'"\`\`\`"
+                  fi
+                fi
+              done <<< "$FILES"
+              DETAILS=$(printf '%s' "$DETAILS" | head -c 6000)
+            else
+              DETAILS="No pude traer la PR para analizar el detalle del conflicto."
+            fi
+
+            BODY=$(printf '### Pir: Conflictos de merge\n\nEsta PR (`%s`) tiene conflictos con `%s` y no puede mergearse todavia.\n\n%s\n\n**Que hacer**\n- Resolvelos a mano, o\n- Comenta `/pir resolver` en esta PR y Pir intenta corregirlos.\n\n%s' "$HEAD_REF" "$BASE_REF" "$DETAILS" "$MARK")
             gh api "repos/$REPO/issues/$n/comments" -f body="$BODY" > /dev/null
 
             if [ -n "${RESEND_API_KEY:-}" ]; then
-              TEXT=$(printf 'La PR #%s "%s" tiene conflictos con %s.\n\nOpciones:\n- Resolverlos a mano.\n- Comentar "/pir resolver" en la PR para que Pir intente corregirlos.\n\n%s' "$n" "$TITLE" "$BASE_REF" "$URL")
+              TEXT=$(printf 'La PR #%s "%s" tiene conflictos con %s.\n\n%s\n\nQue hacer:\n- Resolverlos a mano.\n- Comentar "/pir resolver" en la PR para que Pir intente corregirlos.\n\n%s' "$n" "$TITLE" "$BASE_REF" "$DETAILS" "$URL")
               jq -n --arg to "$EMAIL_TO" --arg subject "[Pir] [$REPO] PR #$n - Conflictos de merge - $TITLE" --arg text "$TEXT" \
                 '{from:"Pir <onboarding@resend.dev>", to:[$to], subject:$subject, text:$text}' > mail.json
               curl -sS --fail-with-body https://api.resend.com/emails \
