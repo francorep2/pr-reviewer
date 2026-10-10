@@ -14,6 +14,10 @@ on:
         required: false
       RESEND_API_KEY:
         required: false
+      PIR_APP_ID:
+        required: false
+      PIR_APP_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -73,6 +77,7 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       CI_RESULT: ${{ needs.ci.outputs.result }}
       HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Skip when no token
         if: ${{ env.HAS_TOKEN != 'true' }}
@@ -130,9 +135,19 @@ jobs:
             {"verdict":"approve"|"changes","summary":"1-2 frases en espanol","issues":[{"severity":"blocker"|"warning"|"nit","file":"ruta","line":123,"problem":"que falla","fix":"como arreglarlo"}]}
             Usa verdict "approve" solo si no hay issues de severidad blocker.
 
+      - name: Get Pir app token
+        id: pir
+        if: ${{ env.HAS_TOKEN == 'true' && env.HAS_APP == 'true' }}
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.PIR_APP_ID }}
+          private-key: ${{ secrets.PIR_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
       - name: Post review and send report
         if: ${{ env.HAS_TOKEN == 'true' }}
         env:
+          GH_TOKEN: ${{ steps.pir.outputs.token || github.token }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MODEL: ${{ inputs.model }}
           EMAIL_TO: ${{ inputs.email_to }}
@@ -151,17 +166,19 @@ jobs:
           BLOCKERS=$(jq '[.issues[]? | select(.severity=="blocker")] | length' out.json)
           VERDICT=$(jq -r '.verdict' out.json)
 
+          # Pir nunca aprueba ni bloquea: solo comenta; la aprobacion es manual.
+          EVENT=COMMENT
           if [ "$BLOCKERS" -gt 0 ] || [ "$CI_RESULT" = "failure" ]; then
-            EVENT=REQUEST_CHANGES; LABEL="Cambios requeridos"
+            LABEL="Cambios requeridos"
           elif [ "$VERDICT" != "approve" ] || [ "$TRUNC" = "true" ] || [ "$WORKFLOW_TOUCHED" = "true" ]; then
-            EVENT=COMMENT; LABEL="Requiere revision manual"
+            LABEL="Requiere revision manual"
           else
-            EVENT=APPROVE; LABEL="Aprobado"
+            LABEL="Listo para aprobar"
           fi
 
           NOTES=""
-          if [ "$TRUNC" = "true" ]; then NOTES="$NOTES"$'\n'"- Diff truncado: solo se reviso el inicio, no se aprueba automaticamente."; fi
-          if [ "$WORKFLOW_TOUCHED" = "true" ]; then NOTES="$NOTES"$'\n'"- Toca .github/workflows: no se aprueba automaticamente."; fi
+          if [ "$TRUNC" = "true" ]; then NOTES="$NOTES"$'\n'"- Diff truncado: solo se reviso el inicio."; fi
+          if [ "$WORKFLOW_TOUCHED" = "true" ]; then NOTES="$NOTES"$'\n'"- Toca .github/workflows: revisar a mano con cuidado."; fi
 
           BODY=$(jq -r --arg model "$MODEL" --arg ci "$CI_RESULT" --arg label "$LABEL" --arg notes "$NOTES" '
             "### Pir: " + $label + " (revision automatica, " + $model + ")\n\n" + .summary +
