@@ -51,8 +51,18 @@ jobs:
           elif [ -f yarn.lock ]; then corepack enable && yarn install --frozen-lockfile
           elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile
           else npm install; fi
-          npm run lint --if-present
-          npm test --if-present
+          # Lint: solo si el proyecto tiene ESLint configurado (si no, `next lint` abre un asistente interactivo).
+          if compgen -G ".eslintrc*" > /dev/null || compgen -G "eslint.config.*" > /dev/null || grep -q '"eslintConfig"' package.json; then
+            npm run lint --if-present
+          else
+            echo "Sin configuracion de ESLint: se omite lint"
+          fi
+          # Test: omitir el placeholder por defecto de npm ("no test specified").
+          if node -e 'const s=(require("./package.json").scripts||{}).test; process.exit(s && !/no test specified/.test(s) ? 0 : 1)'; then
+            npm test --if-present
+          else
+            echo "Sin script de test real: se omite"
+          fi
           npm run build --if-present
 
       - id: out
@@ -124,7 +134,6 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          show_full_output: true
           claude_args: >-
             --model ${{ inputs.model }}
             --max-turns 4
