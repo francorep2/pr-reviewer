@@ -1,4 +1,4 @@
-name: PR Review (reusable)
+name: Pir (reusable)
 
 on:
   workflow_call:
@@ -164,7 +164,7 @@ jobs:
           if [ "$WORKFLOW_TOUCHED" = "true" ]; then NOTES="$NOTES"$'\n'"- Toca .github/workflows: no se aprueba automaticamente."; fi
 
           BODY=$(jq -r --arg model "$MODEL" --arg ci "$CI_RESULT" --arg label "$LABEL" --arg notes "$NOTES" '
-            "### " + $label + " (revision automatica, " + $model + ")\n\n" + .summary +
+            "### Pir: " + $label + " (revision automatica, " + $model + ")\n\n" + .summary +
             "\n\n**CI:** " + $ci + $notes + "\n\n" +
             (if (.issues | length) > 0
              then (.issues | map("- **" + .severity + "** `" + (.file // "?") + (if .line then ":" + (.line | tostring) else "" end) + "`: " + .problem + (if .fix then "\n  - Fix: " + .fix else "" end)) | join("\n"))
@@ -174,9 +174,9 @@ jobs:
             || gh api "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=COMMENT -f body="$BODY" > /dev/null
 
           if [ -n "${RESEND_API_KEY:-}" ]; then
-            jq -n --arg to "$EMAIL_TO" --arg subject "[$REPO] PR #$PR - $LABEL - $PR_TITLE" \
+            jq -n --arg to "$EMAIL_TO" --arg subject "[Pir] [$REPO] PR #$PR - $LABEL - $PR_TITLE" \
               --arg text "$BODY"$'\n\n'"$PR_URL" \
-              '{from:"PR Review <onboarding@resend.dev>", to:[$to], subject:$subject, text:$text}' > mail.json
+              '{from:"Pir <onboarding@resend.dev>", to:[$to], subject:$subject, text:$text}' > mail.json
             curl -sS --fail-with-body https://api.resend.com/emails \
               -H "Authorization: Bearer $RESEND_API_KEY" \
               -H "Content-Type: application/json" \
