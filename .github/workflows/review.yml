@@ -117,7 +117,9 @@ jobs:
           } > review-context.txt
 
       - name: Review with Claude
+        id: claude
         if: ${{ env.HAS_TOKEN == 'true' }}
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -148,6 +150,7 @@ jobs:
         if: ${{ env.HAS_TOKEN == 'true' }}
         env:
           GH_TOKEN: ${{ steps.pir.outputs.token || github.token }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MODEL: ${{ inputs.model }}
           EMAIL_TO: ${{ inputs.email_to }}
@@ -159,8 +162,10 @@ jobs:
           else
             : > out.json
           fi
-          if ! jq -e '.verdict' out.json > /dev/null 2>&1; then
-            echo '{"verdict":"changes","summary":"No se pudo obtener un resultado valido del revisor; revisar manualmente.","issues":[]}' > out.json
+          REVIEW_FAILED=false
+          if [ "$CLAUDE_OUTCOME" != "success" ] || ! jq -e '.verdict' out.json > /dev/null 2>&1; then
+            REVIEW_FAILED=true
+            echo '{"verdict":"changes","summary":"Pir no pudo ejecutar la revision automatica (fallo de autenticacion, de cupo o del modelo). Revisar CLAUDE_CODE_OAUTH_TOKEN y el log del workflow. Este PR no fue revisado ni aprobado.","issues":[]}' > out.json
           fi
 
           BLOCKERS=$(jq '[.issues[]? | select(.severity=="blocker")] | length' out.json)
@@ -177,7 +182,9 @@ jobs:
           # Pir aprueba solo si: sin conflictos, CI no fallo, sin blockers, diff completo
           # y sin tocar workflows. Nunca bloquea (no usa REQUEST_CHANGES).
           EVENT=COMMENT
-          if [ "$MERGEABLE" = "false" ]; then
+          if [ "$REVIEW_FAILED" = "true" ]; then
+            LABEL="Revision no disponible"
+          elif [ "$MERGEABLE" = "false" ]; then
             LABEL="Conflictos de merge"
           elif [ "$BLOCKERS" -gt 0 ] || [ "$CI_RESULT" = "failure" ]; then
             LABEL="Cambios requeridos"
