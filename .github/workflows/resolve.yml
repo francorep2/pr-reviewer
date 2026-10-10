@@ -77,10 +77,12 @@ jobs:
         id: merge
         env:
           BASE_REF: ${{ steps.info.outputs.base_ref }}
+          TOKEN: ${{ steps.pir.outputs.token }}
         run: |
           git config user.name "Pir[bot]"
           git config user.email "pir@users.noreply.github.com"
-          git fetch origin "$BASE_REF"
+          # El checkout no persiste credenciales a proposito; el fetch usa el token explicito.
+          git fetch "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           if git merge --no-edit "origin/$BASE_REF"; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
           else
