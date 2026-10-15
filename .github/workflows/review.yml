@@ -164,6 +164,7 @@ jobs:
       - name: Get Pir app token
         id: pir
         if: ${{ env.HAS_TOKEN == 'true' && env.HAS_APP == 'true' }}
+        continue-on-error: true   # si la app no tiene algun permiso, se sigue con github.token
         uses: actions/create-github-app-token@v3.2.0
         with:
           app-id: ${{ secrets.PIR_APP_ID }}
@@ -283,17 +284,15 @@ jobs:
           gh api "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event="$EVENT" -f body="$BODY_POST" > /dev/null \
             || gh api "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=COMMENT -f body="$BODY_POST" > /dev/null
 
-          # Auto-merge: solo si Pir aprobo Y Pir mismo aplico una correccion en este PR (marcador pir-autofix).
+          # Auto-merge: todo PR que Pir aprueba se mergea (squash) y el mail avisa el resultado.
           if [ "$EVENT" = "APPROVE" ] && [ -n "${PIR_APP_ID:-}" ]; then
-            if gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[]|select(.user.login=="pir-bot[bot]" and (.body|contains("pir-autofix")))|.id' | grep -q .; then
-              if gh pr merge "$PR" -R "$REPO" --squash > merge.log 2>&1; then
-                LABEL="Aprobado y mergeado"; EMOJI="🚀"
-                NOTES_HTML="$NOTES_HTML<li>Pir corrigi&oacute; este PR, lo aprob&oacute; y lo mergeo (squash).</li>"
-                gh api "repos/$REPO/issues/$PR/comments" -f body="### Pir: PR mergeado"$'\n\n'"Correccion aplicada por Pir y revision aprobada; mergeado con squash." > /dev/null || true
-              else
-                echo "::warning::No se pudo mergear automaticamente: $(cat merge.log)"
-                NOTES_HTML="$NOTES_HTML<li>Aprobado, pero no pude mergearlo solo (proteccion de rama o permisos).</li>"
-              fi
+            if gh pr merge "$PR" -R "$REPO" --squash > merge.log 2>&1; then
+              LABEL="Aprobado y mergeado"; EMOJI="🚀"
+              NOTES_HTML="$NOTES_HTML<li>Pir aprob&oacute; este PR y lo merge&oacute; (squash).</li>"
+              gh api "repos/$REPO/issues/$PR/comments" -f body="### Pir: PR mergeado"$'\n\n'"Revision aprobada; mergeado con squash." > /dev/null || true
+            else
+              echo "::warning::No se pudo mergear automaticamente: $(cat merge.log)"
+              NOTES_HTML="$NOTES_HTML<li>Aprobado, pero no pude mergearlo solo (proteccion de rama o permisos).</li>"
             fi
           fi
 
@@ -377,7 +376,7 @@ jobs:
             -d @mail.json > /dev/null
 
   # Si la revision pide cambios (blockers o CI roto), Pir intenta corregirlo con Claude y pushea a la rama.
-  # El push dispara una nueva revision; si queda aprobada, el job review la mergea (ver "Auto-merge").
+  # El push dispara una nueva revision; si queda aprobada, el job review la mergea.
   fix:
     needs: review
     if: ${{ needs.review.outputs.needs_fix == 'true' && github.event.pull_request.head.repo.full_name == github.repository }}
