@@ -91,6 +91,7 @@ jobs:
       CI_RESULT: ${{ needs.ci.outputs.result }}
       HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
       HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
+      IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
     steps:
       - name: Skip when no token
         if: ${{ env.HAS_TOKEN != 'true' }}
@@ -296,6 +297,13 @@ jobs:
               echo "::warning::No se pudo mergear automaticamente: $(cat merge.log)"
               NOTES_HTML="$NOTES_HTML<li>Aprobado, pero no pude mergearlo solo (proteccion de rama o permisos).</li>"
             fi
+          fi
+
+          # Un solo mail por cambio: si Pir va a intentar corregirlo (job `fix`), el mail sale al final
+          # (PR mergeado, o no se pudo corregir), no ahora.
+          if [ "$LABEL" = "Cambios requeridos" ] && [ "$HAS_APP" = "true" ] && [ "$IS_FORK" != "true" ]; then
+            echo "::notice::Pir intentara corregirlo; el mail se envia al terminar"
+            exit 0
           fi
 
           if [ -z "${RESEND_API_KEY:-}" ]; then
@@ -505,10 +513,11 @@ jobs:
           git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:${HEAD_REF}"
 
       - name: Report result
-        if: ${{ always() && steps.cap.outputs.go == 'true' }}
+        if: ${{ always() && steps.req.outputs.go == 'true' }}
         env:
           GH_TOKEN: ${{ steps.pir.outputs.token }}
           OUTCOME: ${{ steps.push.outcome }}
+          ISSUES: ${{ needs.review.outputs.issues }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: ${{ inputs.email_to }}
           PIR_APP_ID: ${{ secrets.PIR_APP_ID }}
@@ -524,10 +533,14 @@ jobs:
           fi
           gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf "$MSG")" > /dev/null
 
+          # Un solo mail por cambio: si se corrigio, el mail lo manda la revision siguiente (PR mergeado).
+          [ "$OUTCOME" = "success" ] && exit 0
           [ -z "${RESEND_API_KEY:-}" ] && exit 0
           SHORT_REPO="${REPO#*/}"
           TITLE_H=$(jq -rn --arg t "$PR_TITLE" '$t|@html')
           DETAIL_H=$(jq -rn --arg t "$DETAIL" '$t|@html')
+          ISSUES_H=$(jq -rn --arg t "$ISSUES" '$t|@html')
+          DETAIL_H="$DETAIL_H<div class=\"muted\" style=\"font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#656d76;margin:12px 0 4px\">Lo que encontr&oacute; la revisi&oacute;n</div><pre style=\"white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.45;margin:0\">$ISSUES_H</pre>"
           cat > mail.html <<EOF
           <!doctype html><html lang="es"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">

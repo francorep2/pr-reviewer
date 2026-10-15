@@ -36,6 +36,7 @@ jobs:
       prs: ${{ steps.detect.outputs.prs }}
     env:
       HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
+      AUTO_RESOLVE: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' && secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
       - name: Get Pir app token
         id: pir
@@ -195,6 +196,13 @@ jobs:
             fi
 
             NEW="$NEW $n"
+
+            # Un solo mail por cambio: si Pir va a resolverlo solo, el mail sale al final
+            # (PR mergeado, o no se pudo resolver). El comentario en el PR queda igual.
+            if [ "$AUTO_RESOLVE" = "true" ]; then
+              echo "::notice::PR #$n: Pir intentara resolver los conflictos; el mail se envia al terminar"
+              continue
+            fi
 
             if [ -z "${RESEND_API_KEY:-}" ]; then
               echo "::notice::RESEND_API_KEY no configurada; no se envio mail (PR #$n)"

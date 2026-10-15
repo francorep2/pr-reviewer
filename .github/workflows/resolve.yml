@@ -163,6 +163,8 @@ jobs:
           fi
           gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf "$MSG")" > /dev/null
 
+          # Un solo mail por cambio: si se resolvio, el mail lo manda la revision siguiente (PR mergeado).
+          [ "$OUTCOME" = "success" ] && exit 0
           [ -z "${RESEND_API_KEY:-}" ] && exit 0
           INFO=$(gh api "repos/$REPO/pulls/$PR")
           TITLE=$(echo "$INFO" | jq -r '.title'); URL=$(echo "$INFO" | jq -r '.html_url')
