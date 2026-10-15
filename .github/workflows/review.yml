@@ -311,6 +311,15 @@ jobs:
             exit 0
           fi
 
+          # Un solo mail por PR: el primer informe reclama el marcador y los demas no envian.
+          MID=$(gh api "repos/$REPO/issues/$PR/comments" -f body="Informe enviado por mail. <!-- pir-mailed -->" --jq .id)
+          FIRST=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[]|select(.body|contains("pir-mailed"))|.id' | sort -n | head -1)
+          if [ "$FIRST" != "$MID" ]; then
+            gh api -X DELETE "repos/$REPO/issues/comments/$MID" > /dev/null || true
+            echo "::notice::Este PR ya recibio su mail; no se envia otro"
+            exit 0
+          fi
+
           # ---- Mail HTML pensado para telefono: una columna, texto grande, boton ancho ----
           case "$CI_RESULT" in
             success) CI_TXT="CI: OK" ;;
@@ -536,6 +545,14 @@ jobs:
           # Un solo mail por cambio: si se corrigio, el mail lo manda la revision siguiente (PR mergeado).
           [ "$OUTCOME" = "success" ] && exit 0
           [ -z "${RESEND_API_KEY:-}" ] && exit 0
+          # Un solo mail por PR: el primer informe reclama el marcador y los demas no envian.
+          MID=$(gh api "repos/$REPO/issues/$PR/comments" -f body="Informe enviado por mail. <!-- pir-mailed -->" --jq .id)
+          FIRST=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[]|select(.body|contains("pir-mailed"))|.id' | sort -n | head -1)
+          if [ "$FIRST" != "$MID" ]; then
+            gh api -X DELETE "repos/$REPO/issues/comments/$MID" > /dev/null || true
+            echo "::notice::Este PR ya recibio su mail; no se envia otro"
+            exit 0
+          fi
           SHORT_REPO="${REPO#*/}"
           TITLE_H=$(jq -rn --arg t "$PR_TITLE" '$t|@html')
           DETAIL_H=$(jq -rn --arg t "$DETAIL" '$t|@html')

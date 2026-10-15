@@ -209,6 +209,15 @@ jobs:
               continue
             fi
 
+            # Un solo mail por PR: el primer informe reclama el marcador y los demas no envian.
+            MID=$(gh api "repos/$REPO/issues/$n/comments" -f body="Informe enviado por mail. <!-- pir-mailed -->" --jq .id)
+            FIRST=$(gh api "repos/$REPO/issues/$n/comments" --paginate --jq '.[]|select(.body|contains("pir-mailed"))|.id' | sort -n | head -1)
+            if [ "$FIRST" != "$MID" ]; then
+              gh api -X DELETE "repos/$REPO/issues/comments/$MID" > /dev/null || true
+              echo "::notice::Este PR ya recibio su mail; no se envia otro"
+              continue
+            fi
+
             TITLE_H=$(esc "$TITLE")
             BASE_H=$(esc "$BASE_REF")
             if [ -n "$LEAD_MD" ]; then
