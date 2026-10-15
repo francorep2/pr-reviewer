@@ -14,6 +14,8 @@ on:
         type: string
         default: francorep2@gmail.com
     secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
       PIR_APP_ID:
         required: false
       PIR_APP_PRIVATE_KEY:
@@ -30,6 +32,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.detect.outputs.prs }}
     env:
       HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
     steps:
@@ -51,6 +55,7 @@ jobs:
           token: ${{ steps.pir.outputs.token || github.token }}
 
       - name: Detect conflicts and notify
+        id: detect
         env:
           GH_TOKEN: ${{ steps.pir.outputs.token || github.token }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
@@ -73,6 +78,7 @@ jobs:
             PRS=$(gh pr list -R "$REPO" --state open --base "$DEFAULT_BRANCH" --json number --jq '.[].number')
           fi
 
+          NEW=""   # PRs con conflicto recien avisados: despues Pir intenta resolverlos solo
           for n in $PRS; do
             MERGEABLE=null
             for i in 1 2 3 4 5 6; do
@@ -188,6 +194,8 @@ jobs:
               continue
             fi
 
+            NEW="$NEW $n"
+
             if [ -z "${RESEND_API_KEY:-}" ]; then
               echo "::notice::RESEND_API_KEY no configurada; no se envio mail (PR #$n)"
               continue
@@ -251,3 +259,19 @@ jobs:
               -H "Content-Type: application/json" \
               -d @mail.json > /dev/null
           done
+
+          jq -cn --arg l "$NEW" '$l | split(" ") | map(select(. != "") | tonumber)' | sed 's/^/prs=/' >> "$GITHUB_OUTPUT"
+
+  # Pir intenta resolver los conflictos con Claude. Si luego la revision lo aprueba, review.yml lo mergea.
+  resolve:
+    needs: check
+    if: ${{ needs.check.outputs.prs != '' && needs.check.outputs.prs != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.check.outputs.prs) }}
+    uses: francorep2/pr-reviewer/.github/workflows/resolve.yml@main
+    with:
+      pr: ${{ matrix.pr }}
+      email_to: ${{ inputs.email_to }}
+    secrets: inherit

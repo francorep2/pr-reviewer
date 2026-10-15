@@ -1,6 +1,7 @@
 name: Pir resolve (reusable)
 
-# Resuelve conflictos de merge cuando el dueño comenta "/pir resolver" en la PR.
+# Resuelve conflictos de merge: automatico (lo llama conflicts.yml con `pr`) o cuando el dueño
+# comenta "/pir resolver" en la PR.
 # Mergea la rama base dentro de la rama del PR, resuelve conflictos con Claude y pushea.
 # Solo PRs con rama en el mismo repo (no forks).
 
@@ -10,8 +11,17 @@ on:
       model:
         type: string
         default: claude-sonnet-5-5
+      pr:
+        description: Numero de PR (modo automatico). Si falta se usa el de issue_comment.
+        type: number
+        default: 0
+      email_to:
+        type: string
+        default: francorep2@gmail.com
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+      RESEND_API_KEY:
         required: false
       PIR_APP_ID:
         required: false
@@ -19,7 +29,7 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
   issues: write
 
@@ -29,7 +39,8 @@ jobs:
     timeout-minutes: 20
     env:
       REPO: ${{ github.repository }}
-      PR: ${{ github.event.issue.number }}
+      PR: ${{ inputs.pr || github.event.issue.number }}
+      AUTO: ${{ inputs.pr != 0 }}
       HAS_APP: ${{ secrets.PIR_APP_ID != '' && secrets.PIR_APP_PRIVATE_KEY != '' }}
       HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
@@ -56,6 +67,14 @@ jobs:
           GH_TOKEN: ${{ steps.pir.outputs.token }}
         run: |
           set -euo pipefail
+          # Modo automatico: maximo 2 intentos por PR para no entrar en un bucle push -> conflicto -> push.
+          if [ "$AUTO" = "true" ]; then
+            TRIES=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq '.[]|select(.user.login=="pir-bot[bot]" and (.body|contains("pir-resolve-try")))|.id' | wc -l)
+            if [ "${TRIES:-0}" -ge 2 ]; then
+              echo "::notice::PR #$PR: ya hubo 2 intentos automaticos; se deja para resolver a mano"
+              exit 1
+            fi
+          fi
           INFO=$(gh api "repos/$REPO/pulls/$PR")
           HEAD_REPO=$(echo "$INFO" | jq -r '.head.repo.full_name')
           echo "head_ref=$(echo "$INFO" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
@@ -64,7 +83,7 @@ jobs:
             gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf '### Pir: no puedo corregir esta PR\n\nViene de un fork (`%s`); no tengo permiso para pushear a esa rama.' "$HEAD_REPO")" > /dev/null
             exit 1
           fi
-          gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf '### Pir: resolviendo conflictos...\n\nMergeando `%s` en `%s`.' "$(echo "$INFO" | jq -r '.base.ref')" "$(echo "$INFO" | jq -r '.head.ref')")" > /dev/null
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf '### Pir: resolviendo conflictos...\n\nMergeando `%s` en `%s`.\n\n<!-- pir-resolve-try -->' "$(echo "$INFO" | jq -r '.base.ref')" "$(echo "$INFO" | jq -r '.head.ref')")" > /dev/null
 
       - uses: actions/checkout@v4
         with:
@@ -125,14 +144,43 @@ jobs:
           git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:${HEAD_REF}"
 
       - name: Report result
-        if: ${{ always() && steps.pir.outputs.token != '' }}
+        if: ${{ always() && steps.pir.outputs.token != '' && steps.info.outcome != 'skipped' }}
         env:
           GH_TOKEN: ${{ steps.pir.outputs.token }}
           OUTCOME: ${{ steps.push.outcome }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ inputs.email_to }}
+          PIR_APP_ID: ${{ secrets.PIR_APP_ID }}
         run: |
           if [ "$OUTCOME" = "success" ]; then
-            MSG="### Pir: conflictos resueltos\n\nPushee el merge a la rama del PR. Se vuelve a revisar automaticamente."
+            LABEL="Conflictos resueltos"; EMOJI="🔧"; COLOR="#16a34a"
+            DETAIL="Pushee el merge a la rama del PR. Se vuelve a revisar y, si Pir lo aprueba, se mergea solo."
+            MSG="### Pir: conflictos resueltos\n\n$DETAIL\n\n<!-- pir-autofix -->"
           else
-            MSG="### Pir: no pude resolver los conflictos\n\nRevisa el log del workflow y resolvelos a mano."
+            LABEL="No pude resolver los conflictos"; EMOJI="🛑"; COLOR="#dc2626"
+            DETAIL="Revisa el log del workflow y resolvelos a mano."
+            MSG="### Pir: no pude resolver los conflictos\n\n$DETAIL"
           fi
           gh api "repos/$REPO/issues/$PR/comments" -f body="$(printf "$MSG")" > /dev/null
+
+          [ -z "${RESEND_API_KEY:-}" ] && exit 0
+          INFO=$(gh api "repos/$REPO/pulls/$PR")
+          TITLE=$(echo "$INFO" | jq -r '.title'); URL=$(echo "$INFO" | jq -r '.html_url')
+          SHORT_REPO="${REPO#*/}"
+          TITLE_H=$(jq -rn --arg t "$TITLE" '$t|@html')
+          cat > mail.html <<EOF
+          <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+          <body style="margin:0;padding:0;background:#f3f4f6"><div style="max-width:560px;margin:0 auto;padding:12px">
+            <div style="background:#ffffff;border-radius:14px;padding:18px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:16px;line-height:1.5;color:#1f2328">
+              <table role="presentation" style="border-collapse:collapse"><tr>
+                <td style="padding-right:12px"><img src="https://avatars.githubusercontent.com/in/${PIR_APP_ID}?s=96" width="44" height="44" alt="Pir" style="display:block;border-radius:10px"></td>
+                <td><div style="font-size:17px;font-weight:700">Pir</div><div style="font-size:13px;color:#656d76">$SHORT_REPO &middot; PR #$PR</div></td>
+              </tr></table>
+              <div style="margin:18px 0 8px"><span style="display:inline-block;background:$COLOR;color:#ffffff;padding:6px 14px;border-radius:999px;font-size:14px;font-weight:700">$EMOJI $LABEL</span></div>
+              <h1 style="font-size:19px;line-height:1.3;margin:10px 0 12px">$TITLE_H</h1>
+              <p style="margin:0 0 6px">$DETAIL</p>
+              <a href="$URL" style="display:inline-block;margin-top:18px;background:#4f46e5;color:#ffffff;text-decoration:none;padding:14px 22px;border-radius:10px;font-size:16px;font-weight:700">Abrir PR</a>
+            </div></div></body></html>
+          EOF
+          jq -n --arg to "$EMAIL_TO" --arg subject "$EMOJI $LABEL · $SHORT_REPO #$PR · $TITLE"             --arg text "$LABEL. $DETAIL $URL" --rawfile html mail.html             '{from:"Pir <onboarding@resend.dev>", to:[$to], subject:$subject, text:$text, html:$html}' > mail.json
+          curl -sS --fail-with-body https://api.resend.com/emails             -H "Authorization: Bearer $RESEND_API_KEY" -H "Content-Type: application/json" -d @mail.json > /dev/null
